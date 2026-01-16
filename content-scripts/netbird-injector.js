@@ -66,6 +66,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 var lastMenuTriggerInfo = null;
+var peerDetailPageInfo = null; // Store peer info for the detail page
 
 function resolvePeerContext(row) {
   if (!row) return { peerName: '', peerHost: '', peerIp: '' };
@@ -409,14 +410,16 @@ function createFileTransferMenuItem(peerInfo) {
 
 function injectPortLinks(menuEl, peerInfo) {
   if (!menuEl || menuEl.dataset.netdeskPortsInjected === '1') return;
-  if (!peerInfo || !peerInfo.row) return;
+  if (!peerInfo || (!peerInfo.row && !peerInfo.isDetailPage)) return;
   const targetExists = (peerInfo.peerHost && peerInfo.peerHost.trim()) || (peerInfo.peerIp && peerInfo.peerIp.trim());
   if (!targetExists) return;
 
   const fragment = document.createDocumentFragment();
 
   // Add RustDesk menu items (only for active peers and if enabled)
-  if (rustdeskEnabled && isPeerActive(peerInfo.row)) {
+  // For detail page, we check if RustDesk is enabled - the peer is assumed active since buttons are visible
+  const isActive = peerInfo.isDetailPage || isPeerActive(peerInfo.row);
+  if (rustdeskEnabled && isActive) {
     const rustdeskItem = createRustDeskMenuItem(peerInfo);
     fragment.appendChild(rustdeskItem);
 
@@ -463,12 +466,30 @@ function injectPortsForMenuElement(menuEl) {
   if ((!peerInfo || !peerInfo.row) && lastMenuTriggerInfo) {
     peerInfo = lastMenuTriggerInfo;
   }
-  if (!peerInfo || !peerInfo.row) return;
+  
+  // For peer detail page, use the stored peer info if no row is found
+  if ((!peerInfo || !peerInfo.row) && isPeerDetailPage() && peerDetailPageInfo) {
+    peerInfo = {
+      trigger: trigger,
+      row: null, // No table row on detail page
+      peerName: peerDetailPageInfo.peerName,
+      peerHost: peerDetailPageInfo.peerHost,
+      peerIp: peerDetailPageInfo.peerIp,
+      isDetailPage: true // Flag to indicate this is from detail page
+    };
+  }
+  
+  if (!peerInfo) return;
+  // Skip row check for detail page
+  if (!peerInfo.isDetailPage && !peerInfo.row) return;
+  
   if ((!peerInfo.peerHost || !peerInfo.peerHost.trim()) && (!peerInfo.peerIp || !peerInfo.peerIp.trim())) {
-    const resolved = resolvePeerContext(peerInfo.row);
-    peerInfo.peerHost = resolved.peerHost;
-    peerInfo.peerIp = resolved.peerIp;
-    peerInfo.peerName = peerInfo.peerName || resolved.peerName;
+    if (peerInfo.row) {
+      const resolved = resolvePeerContext(peerInfo.row);
+      peerInfo.peerHost = resolved.peerHost;
+      peerInfo.peerIp = resolved.peerIp;
+      peerInfo.peerName = peerInfo.peerName || resolved.peerName;
+    }
   }
   injectPortLinks(menuEl, peerInfo);
 }
@@ -521,6 +542,11 @@ function handleRouteChange() {
   }
 
   addressColIndex = -1;
+
+  // Clear peer detail info when leaving the detail page
+  if (!isPeerDetailPage()) {
+    peerDetailPageInfo = null;
+  }
 
   if (isPeersPage()) {
     setTimeout(cachePeerData, 100);
@@ -843,59 +869,106 @@ function injectPeerDetailButton() {
     peerName = heading.textContent.trim();
   }
 
-  // Try to find address information from the info list
-  // Look for "NetBird IP Address" and "Domain Name" sections
-  // Try to find address information from the info list
-  // Look for "NetBird IP Address" and "Domain Name" sections
-  // We scan all LI elements to be robust against layout changes
-  const listItems = Array.from(document.querySelectorAll('li'));
-
-  for (const item of listItems) {
-    const itemText = (item.innerText || item.textContent || '').trim();
-    if (!itemText) continue;
-
-    // Normalize text for checking labels
-    const lowerText = itemText.toLowerCase();
-
-    // Check for NetBird IP Address
-    // We look for the label, then try to extract an IP from the same row's text
-    if (lowerText.includes('netbird ip') || lowerText.includes('ip address')) {
-      const ipMatch = itemText.match(/\b\d{1,3}(?:\.\d{1,3}){3}\b/);
+  // Strategy 1: Search all text content for IP pattern in context of "NetBird IP"
+  // This is more robust as it searches the entire page
+  const allTextElements = Array.from(document.querySelectorAll('div, span, p, li, td'));
+  
+  for (const el of allTextElements) {
+    // Skip elements with many children (we want leaf nodes)
+    if (el.children.length > 3) continue;
+    
+    const text = (el.innerText || el.textContent || '').trim();
+    if (!text) continue;
+    const lowerText = text.toLowerCase();
+    
+    // Look for NetBird IP Address - check for IP in context
+    if ((lowerText.includes('netbird ip') || lowerText.includes('ip address')) && !lowerText.includes('public')) {
+      const ipMatch = text.match(/\b(100\.(?:\d{1,3}\.){2}\d{1,3})\b/);
       if (ipMatch) {
-        peerIp = ipMatch[0];
-        console.log('Found NetBird IP (robust scan):', peerIp);
+        peerIp = ipMatch[1];
+        console.log('[NetDesk] Found NetBird IP from label context:', peerIp);
       }
     }
-
-    // Check for Domain Name / Hostname
-    if (lowerText.includes('domain name') || (lowerText.includes('hostname') && !lowerText.includes('system'))) {
-      // First try: look for a distinct value element (often 'truncate' or just the last div)
-      const possibleValues = Array.from(item.querySelectorAll('div, span, p'));
-      let foundValue = '';
-
-      // Reverse iterate to find the last contentful element that isn't the label
-      for (let i = possibleValues.length - 1; i >= 0; i--) {
-        const t = (possibleValues[i].textContent || '').trim();
-        if (t && !t.toLowerCase().includes('domain name') && !t.toLowerCase().includes('hostname')) {
-          foundValue = t;
-          break;
+    
+    // Look for Domain Name / Hostname
+    if (lowerText.includes('domain name') && !lowerText.includes('system')) {
+      // The value is likely in a sibling or child element
+      const parent = el.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.querySelectorAll('div, span'));
+        for (const sib of siblings) {
+          const sibText = (sib.textContent || '').trim();
+          // Look for .netbird.cloud domain or similar
+          if (sibText.includes('.netbird.') || sibText.includes('.cloud') || sibText.match(/^[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+$/)) {
+            peerHost = sibText;
+            console.log('[NetDesk] Found domain name:', peerHost);
+            break;
+          }
         }
       }
-
-      // Fallback: if no distinct element found, try to strip the label from the full text
-      if (!foundValue) {
-        foundValue = itemText.replace(/domain name|hostname/gi, '').replace(/[:]/g, '').trim();
+    }
+  }
+  
+  // Strategy 2: If IP not found, look for 100.x.x.x pattern (NetBird uses 100.x.x.x range)
+  if (!peerIp) {
+    const bodyText = document.body.innerText || document.body.textContent || '';
+    // NetBird uses 100.x.x.x IP range 
+    const netbirdIpMatch = bodyText.match(/\b(100\.(?:\d{1,3}\.){2}\d{1,3})\b/);
+    if (netbirdIpMatch) {
+      peerIp = netbirdIpMatch[1];
+      console.log('[NetDesk] Found NetBird IP from body scan:', peerIp);
+    }
+  }
+  
+  // Strategy 3: Fallback - Look specifically in list items as before
+  if (!peerIp || !peerHost) {
+    const listItems = Array.from(document.querySelectorAll('li'));
+    
+    for (const item of listItems) {
+      const itemText = (item.innerText || item.textContent || '').trim();
+      if (!itemText) continue;
+      const lowerText = itemText.toLowerCase();
+      
+      // Check for NetBird IP Address
+      if (!peerIp && (lowerText.includes('netbird ip') || lowerText.includes('ip address'))) {
+        const ipMatch = itemText.match(/\b(100\.(?:\d{1,3}\.){2}\d{1,3})\b/) || itemText.match(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/);
+        if (ipMatch) {
+          peerIp = ipMatch[1];
+          console.log('[NetDesk] Found NetBird IP (li scan):', peerIp);
+        }
       }
-
-      // Sanity check the found value
-      if (foundValue && foundValue.length > 1) {
-        peerHost = foundValue;
-        console.log('Found Domain/Host (robust scan):', peerHost);
+      
+      // Check for Domain Name / Hostname
+      if (!peerHost && (lowerText.includes('domain name') || (lowerText.includes('hostname') && !lowerText.includes('system')))) {
+        // Look for .netbird.cloud pattern
+        const domainMatch = itemText.match(/([a-zA-Z0-9-]+\.netbird\.[a-zA-Z0-9.-]+)/);
+        if (domainMatch) {
+          peerHost = domainMatch[1];
+          console.log('[NetDesk] Found Domain/Host (li scan):', peerHost);
+        } else {
+          // Fallback: try to extract any hostname-like value
+          const possibleValues = Array.from(item.querySelectorAll('div, span, p'));
+          for (let i = possibleValues.length - 1; i >= 0; i--) {
+            const t = (possibleValues[i].textContent || '').trim();
+            if (t && !t.toLowerCase().includes('domain name') && !t.toLowerCase().includes('hostname') && t.includes('.')) {
+              peerHost = t;
+              console.log('[NetDesk] Found Domain/Host (fallback):', peerHost);
+              break;
+            }
+          }
+        }
       }
     }
   }
 
-  console.log('Peer detail info:', { peerName, peerHost, peerIp });
+  console.log('[NetDesk] Peer detail info extracted:', { peerName, peerHost, peerIp });
+
+  // Store peer info for use by dropdown menus on this page
+  peerDetailPageInfo = {
+    peerName: peerName,
+    peerHost: peerHost,
+    peerIp: peerIp
+  };
 
   // Create wrapper for all RustDesk buttons
   const wrapper = document.createElement('div');
