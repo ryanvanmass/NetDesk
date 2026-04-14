@@ -376,7 +376,7 @@ function createFileTransferMenuItem(peerInfo) {
   leftSide.appendChild(iconSvg);
 
   const labelSpan = document.createElement('span');
-  labelSpan.textContent = 'Transfert (RustDesk)';
+  labelSpan.textContent = 'Transfer (RustDesk)';
   leftSide.appendChild(labelSpan);
 
   inner.appendChild(leftSide);
