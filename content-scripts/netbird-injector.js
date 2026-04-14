@@ -791,7 +791,7 @@ function createPeerDetailFileTransferButton(peerHost, peerIp) {
   button.appendChild(iconSvg);
 
   // Add label
-  const label = document.createTextNode('Transfert');
+  const label = document.createTextNode('Transfer');
   button.appendChild(label);
 
   button.addEventListener('click', () => {
